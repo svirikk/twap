@@ -1,0 +1,20 @@
+{
+  "name": "hyperliquid-twap-copy-bot",
+  "version": "1.0.0",
+  "description": "Копіює TWAP-ордери whitelist-гаманців з Hyperliquid (через Telegram-канал) на MEXC Futures",
+  "main": "index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node index.js",
+    "dry-run": "DRY_RUN=true node index.js",
+    "check-balance": "node scripts/check-balance.js"
+  },
+  "dependencies": {
+    "axios": "^1.7.7",
+    "better-sqlite3": "^11.3.0",
+    "cheerio": "^1.0.0",
+    "dotenv": "^16.4.5",
+    "node-telegram-bot-api": "^0.66.0",
+    "ws": "^8.18.0"
+  }
+}

@@ -76,11 +76,21 @@ class TelegramListener {
       return;
     }
 
+    this._pollCount = (this._pollCount || 0) + 1;
+    const maxIdOnPage = messages.length ? messages[messages.length - 1].id : null;
+    logger.debug(`[TG-LISTENER] poll #${this._pollCount}: отримано ${messages.length} повідомлень зі сторінки, max_id_на_сторінці=${maxIdOnPage}, lastSeenId=${this.lastSeenId}`);
+
+    // Heartbeat раз на ~60 полів (незалежно від DEBUG), щоб було видно живий
+    // процес і те, чи max_id на сторінці взагалі рухається з часом.
+    if (this._pollCount % 60 === 0) {
+      logger.info(`[TG-LISTENER] Heartbeat: ${this._pollCount} полів виконано, max_id_на_сторінці=${maxIdOnPage}, lastSeenId=${this.lastSeenId}`);
+    }
+
     if (messages.length === 0) return;
 
     if (this.lastSeenId === null) {
       // Перший успішний polling — фіксуємо baseline, історію не обробляємо.
-      this.lastSeenId = messages[messages.length - 1].id;
+      this.lastSeenId = maxIdOnPage;
       logger.info(`[TG-LISTENER] Baseline встановлено: message_id=${this.lastSeenId}. Історія на сторінці ігнорується, чекаю нові повідомлення.`);
       return;
     }
@@ -88,6 +98,7 @@ class TelegramListener {
     const fresh = messages.filter(m => m.id > this.lastSeenId);
     if (fresh.length === 0) return;
 
+    logger.info(`[TG-LISTENER] Знайдено ${fresh.length} нових повідомлень (id ${fresh[0].id}..${fresh[fresh.length - 1].id})`);
     for (const msg of fresh) {
       this.lastSeenId = Math.max(this.lastSeenId, msg.id);
       if (this.onMessageCallback) {

@@ -7,22 +7,19 @@ const logger = require('../utils/logger');
 const { floorToStep, roundToTick, isValidNumber } = require('../utils/helpers');
 
 // ============================================================================
-// TP: ЧОМУ SELF-MANAGED, А НЕ БІРЖОВИЙ inline TP/SL
-// Кілька TWAP того самого wallet+symbol+side можуть відкритись, поки
-// попередній ще активний. MEXC (навіть у hedge-режимі) зливає їх в ОДНУ
-// біржову позицію (один positionId, усереднена ціна) — hedge розділяє лише
-// LONG/SHORT, а не кілька угод одного напрямку. Біржовий TP/SL (inline в
-// order/create) чіпляється до ПОЗИЦІЇ, а не до конкретного обсягу/ордера —
-// отже не може дати незалежний TP на кожен TWAP, коли вони поділяють один
-// positionId. Тому TP тут — це наш власний REST-поллінг ціни (tpPollIntervalMs)
-// і reduce-only market-закриття РІВНО тієї к-сті контрактів, яка належить
-// конкретному TWAP. Компроміс: latency ~tpPollIntervalMs замість миттєвого
-// біржового тригера.
+// TP: біржовий, прикріплений інлайн при відкритті (openMarketOrderWithProtection).
+// Виявлення спрацювання — через приватний WS (push.personal.position, state=3),
+// не через власний REST-поллінг ціни.
+//
+// Кілька TWAP одного wallet+symbol+side можуть злитись MEXC в одну позицію —
+// тоді TP спрацює на всю позицію одразу, не окремо по частці кожного TWAP.
+// За явним рішенням користувача це прийнятний компроміс заради простоти й
+// надійності біржового тригера (замість затримки й складності власного
+// REST-поллінгу ціни). Деталі — коментар над mexc.service.openMarketOrderWithProtection.
 // ============================================================================
 
 const STALE_CREATE_MS = 15000; // TWAP-сигнали старші за це при рестарті вважаються простроченими для входу
 
-let tpMonitorInterval = null;
 let reconcileInterval = null;
 
 function computeSizing(balance, entryPrice, contractInfo) {
@@ -135,9 +132,10 @@ async function openForTwap(twapEvent) {
 
     await mexc.setLeverage({ symbol: mexcSymbol, leverage: config.trading.leverage, openType: config.trading.openType, positionType });
 
-    const order = await mexc.openMarketOrder({
+    const order = await mexc.openMarketOrderWithProtection({
       symbol: mexcSymbol, side, vol: sizing.contracts, leverage: config.trading.leverage,
-      openType: config.trading.openType, price: entryPriceEstimate, positionMode: config.trading.positionMode
+      openType: config.trading.openType, price: entryPriceEstimate, positionMode: config.trading.positionMode,
+      takeProfitPrice: computeTpPrice(entryPriceEstimate, direction, contractInfo.priceUnit)
     });
 
     store.updatePosition(positionRow.id, { entry_order_id: order.orderId });
@@ -261,43 +259,9 @@ async function handleTwapClosed({ event, finishStatus }) {
 }
 
 // ---------------------------------------------------------------------
-// SELF-MANAGED TP MONITOR
-// ---------------------------------------------------------------------
-async function tpTick() {
-  const openPositions = store.getAllOpenPositions();
-  if (openPositions.length === 0) return;
-
-  const bySymbol = new Map();
-  for (const p of openPositions) {
-    if (!bySymbol.has(p.mexc_symbol)) bySymbol.set(p.mexc_symbol, []);
-    bySymbol.get(p.mexc_symbol).push(p);
-  }
-
-  for (const [symbol, positions] of bySymbol.entries()) {
-    try {
-      const ticker = await mexc.getTicker(symbol);
-      const price = ticker.lastPrice;
-      for (const p of positions) {
-        const hit = p.direction === 'LONG' ? price >= p.tp_price : price <= p.tp_price;
-        if (hit) closePosition(p, 'tp', price).catch(err => logger.error(`[TP] ${symbol} closePosition error: ${err.message}`));
-      }
-    } catch (error) {
-      logger.error(`[TP] Не вдалось отримати тікер ${symbol}: ${error.message}`);
-    }
-  }
-}
-
-function startTpMonitor() {
-  if (tpMonitorInterval) return;
-  tpMonitorInterval = setInterval(() => {
-    tpTick().catch(err => logger.error(`[TP] Monitor loop error: ${err.message}`));
-  }, config.monitoring.tpPollIntervalMs);
-  logger.info(`[POSITION] TP-monitor запущено (кожні ${config.monitoring.tpPollIntervalMs}мс)`);
-}
-
-// ---------------------------------------------------------------------
-// Приватний WS: детекція повного закриття позиції ЗОВНІ нашого флоу
-// (ліквідація, ручна дія в UI MEXC тощо). ПРИМІТКА: якщо кілька TWAP
+// Приватний WS: детекція повного закриття позиції (найчастіше — спрацював
+// біржовий TP; також ліквідація чи ручна дія в UI MEXC потрапляють сюди ж,
+// цей push не розрізняє причину). ПРИМІТКА: якщо кілька TWAP ділять один
 // ділять один mexc_position_id, точний PnL по кожному окремому рядку тут
 // оцінюється пропорційно до його qty — це наближення, а не точна цифра з
 // біржі (сама біржа не розрізняє наші TWAP-легенди всередині однієї позиції).
@@ -312,18 +276,20 @@ function wireExchangePushMonitor() {
     const exitPrice = parseFloat(data.closeAvgPrice);
     const totalPnl = parseFloat(data.closeProfitLoss ?? data.realised ?? 0);
 
-    logger.warn(`[POSITION] Позиція ${data.positionId} закрита ЗОВНІ звичайного флоу (push, state=3) — фіналізую ${rows.length} пов'язаних записів пропорційно`);
+    logger.info(`[TP] Позиція ${data.positionId} закрита біржею (push, state=3) — найімовірніше спрацював TP; фіналізую ${rows.length} пов'язаних записів (пропорційно, якщо їх декілька на цій позиції)`);
 
     for (const row of rows) {
       if (!store.claimPositionClosing(row.id)) continue;
       const share = totalQty > 0 ? row.qty / totalQty : 1 / rows.length;
+      const pnlShare = totalPnl * share;
       store.updatePosition(row.id, {
-        status: 'closed', close_reason: 'external', exit_price: exitPrice,
-        pnl: totalPnl * share, closed_at: Date.now()
+        status: 'closed', close_reason: 'tp', exit_price: exitPrice,
+        pnl: pnlShare, closed_at: Date.now()
       });
       const twapEvent = store.getTwapEvent(row.twap_event_id);
-      if (twapEvent) store.claimTwapStatus(twapEvent.id, ['position_open'], 'closed_finished');
-      notifier.notifyClosed({ symbol: row.mexc_symbol, direction: row.direction, reason: 'external', entryPrice: row.entry_price, exitPrice, pnl: totalPnl * share }).catch(() => {});
+      if (twapEvent) store.claimTwapStatus(twapEvent.id, ['position_open'], 'closed_tp');
+      logger.info(`[TP] Symbol: ${row.mexc_symbol} | TwapId: ${twapEvent?.twap_id || '—'} | Entry: ${row.entry_price} | Exit: ${exitPrice} | PnL: ${pnlShare.toFixed(2)}`);
+      notifier.notifyClosed({ symbol: row.mexc_symbol, direction: row.direction, reason: 'tp', entryPrice: row.entry_price, exitPrice, pnl: pnlShare }).catch(() => {});
     }
   });
 }
@@ -439,6 +405,6 @@ function startCleanupLoop() {
 }
 
 module.exports = {
-  openForTwap, handleTwapClosed, startTpMonitor, startReconciliation,
+  openForTwap, handleTwapClosed, startReconciliation,
   wireExchangePushMonitor, recoverOnStartup, startCleanupLoop, computeSizing
 };

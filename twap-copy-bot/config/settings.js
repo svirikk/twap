@@ -62,9 +62,6 @@ const config = {
   },
 
   monitoring: {
-    // Як часто перевіряти ціну відкритих позицій для власного TP (self-managed,
-    // див. пояснення в position-manager.js — чому не inline TP/SL біржі)
-    tpPollIntervalMs: parseInt(process.env.TP_POLL_INTERVAL_MS || '1000'),
     // Рідкісна звірка локального стану з реальними позиціями на біржі
     reconcileIntervalMs: parseInt(process.env.RECONCILE_INTERVAL_MS || '60000')
   },

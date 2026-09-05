@@ -4,6 +4,9 @@
   "description": "Копіює TWAP-ордери whitelist-гаманців з Hyperliquid (через Telegram-канал) на MEXC Futures",
   "main": "index.js",
   "type": "commonjs",
+  "engines": {
+    "node": ">=22.0.0"
+  },
   "scripts": {
     "start": "node index.js",
     "dry-run": "DRY_RUN=true node index.js",
@@ -11,7 +14,7 @@
   },
   "dependencies": {
     "axios": "^1.7.7",
-    "better-sqlite3": "^11.3.0",
+    "better-sqlite3": "^13.0.0",
     "cheerio": "^1.0.0",
     "dotenv": "^16.4.5",
     "node-telegram-bot-api": "^0.66.0",

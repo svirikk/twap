@@ -165,11 +165,31 @@ class MexcService {
   // ---------------------------------------------------------------------
 
   /**
-   * Ринковий вхід у позицію. side: 1 = open long, 3 = open short.
-   * Без inline TP/SL — TP цього бота керується самостійно (position-manager.js).
+   * Ринковий вхід у позицію З інлайн TP, ОДНИМ запитом (атомарно — нема вікна
+   * "позиція відкрита, але без захисту"). side: 1 = open long, 3 = open short.
+   *
+   * Це саме той підхід, що вже перевірений на реальних ордерах у вихідному
+   * коді користувача: окремий виклик stoporder/place (placeTpSl нижче) двічі
+   * падав з різними помилками ([600], потім [5001]) — документація цього
+   * ендпоінту виявилась ненадійною/суперечливою. Робочий варіант — слати
+   * stopLossPrice/takeProfitPrice ПРЯМО в order/create, включно з market-
+   * ордером (type=5).
+   *
+   * TP тут прикріплений НА РІВНІ ПОЗИЦІЇ (не на конкретний обсяг угоди). Якщо
+   * кілька TWAP одного wallet+symbol+side зіллються в одну біржову позицію
+   * (MEXC це робить автоматично), TP спрацює на всю позицію одразу, а не
+   * окремо на частку кожного TWAP. За домовленістю з користувачем — прийнятний
+   * компроміс заради простоти й надійності біржового тригера (замість
+   * власного REST-поллінгу ціни).
+   *
+   * КОМПРОМІС: інлайн-спосіб не підтримує takeProfitType=limit — TP тут
+   * виконується як MARKET по спрацюванню (гарантоване виконання, можливий
+   * невеликий сліпедж проти точної ціни +2%/-2%).
    */
-  async openMarketOrder({ symbol, side, vol, leverage, openType, price, positionMode }) {
-    const params = { symbol, price, vol, leverage, side, type: 5, openType, positionMode };
+  async openMarketOrderWithProtection({
+    symbol, side, vol, leverage, openType, price, positionMode, takeProfitPrice
+  }) {
+    const params = { symbol, price, vol, leverage, side, type: 5, openType, positionMode, takeProfitPrice };
     const res = await this.request('POST', '/api/v1/private/order/create', params, true);
     return res.data; // { orderId, ts }
   }

@@ -82,7 +82,6 @@ async function start() {
   // інакше нове й старе оброблялось би впереміш.
   await positionManager.recoverOnStartup();
 
-  positionManager.startTpMonitor();
   positionManager.startReconciliation();
   positionManager.startCleanupLoop();
 

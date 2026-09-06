@@ -11,7 +11,8 @@
     "start": "node index.js",
     "dry-run": "DRY_RUN=true node index.js",
     "check-balance": "node scripts/check-balance.js",
-    "debug-channel": "node scripts/debug-fetch-channel.js"
+    "debug-channel": "node scripts/debug-fetch-channel.js",
+    "find-symbol": "node scripts/find-symbol.js"
   },
   "dependencies": {
     "axios": "^1.7.7",

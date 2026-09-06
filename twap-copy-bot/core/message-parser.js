@@ -12,12 +12,22 @@ const { parseMoneyShort, parseDurationToSeconds, parseTwapTimestampUtc, normaliz
 function parseMessage(text, receivedAtMs = Date.now()) {
   if (!text) return { type: null };
 
+  // КРИТИЧНО: перевіряємо finish/terminated ПЕРШИМ, незалежно від емодзі на
+  // початку тексту. Причина: реальні finish/terminated повідомлення каналу,
+  // судячи з усього, можуть повторно використовувати той самий заголовок
+  // "$X покупка/продажа SYMBOL в течении Yч" (з тим самим 🟩/🟥ла початку),
+  // що й CREATE-повідомлення про новий TWAP. Якщо перевіряти емодзі РАНІШЕ,
+  // ніж "Статус: finished/terminated", бот сприймає завершення TWAP за НОВИЙ
+  // TWAP і замість закриття відкриває позицію повторно — саме той баг, який
+  // був знайдений у продакшені.
+  if (/Статус:\s*(finished|terminated)/i.test(text) || /TWAP\s+(отменён|отменен|завершён|завершен)/i.test(text)) {
+    return parseFinishMessage(text);
+  }
+
   if (/^[🟩🟥]/.test(text.trim())) {
     return parseCreateMessage(text, receivedAtMs);
   }
-  if (/TWAP\s+(отменён|отменен|завершён|завершен)/i.test(text) || /Статус:\s*(finished|terminated)/i.test(text)) {
-    return parseFinishMessage(text);
-  }
+
   return { type: null };
 }
 

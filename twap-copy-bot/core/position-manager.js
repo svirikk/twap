@@ -1,6 +1,7 @@
 const mexc = require('../services/mexc.service');
 const mexcUserStream = require('../services/mexc-user-stream.service');
 const notifier = require('../services/notifier.service');
+const score = require('./score');
 const store = require('../db/store');
 const config = require('../config/settings');
 const logger = require('../utils/logger');
@@ -123,7 +124,9 @@ async function openForTwap(twapEvent) {
       });
       store.claimTwapStatus(twapEvent.id, ['created'], 'position_open');
       logSummary('[TRADE OPENED][DRY RUN]', mexcSymbol, direction, sizing, entryPrice, tpPrice);
-      await notifier.notifyOpened({ symbol: mexcSymbol, direction, ...sizing, entryPrice, tpPrice, dryRun: true });
+      const sizeContext = score.buildSizeContext(twapEvent);
+      const msgId = await notifier.notifyOpened({ symbol: mexcSymbol, direction, ...sizing, entryPrice, tpPrice, dryRun: true, sizeContext });
+      if (msgId) store.updatePosition(positionRow.id, { notify_message_id: msgId });
       return;
     }
 
@@ -157,7 +160,9 @@ async function openForTwap(twapEvent) {
     store.claimTwapStatus(twapEvent.id, ['created'], 'position_open');
 
     logSummary('[TRADE OPENED]', mexcSymbol, direction, { ...sizing, contracts: qty }, entryPrice, tpPrice);
-    await notifier.notifyOpened({ symbol: mexcSymbol, direction, ...sizing, contracts: qty, entryPrice, tpPrice, dryRun: false });
+    const sizeContext = score.buildSizeContext(twapEvent);
+    const msgId = await notifier.notifyOpened({ symbol: mexcSymbol, direction, ...sizing, contracts: qty, entryPrice, tpPrice, dryRun: false, sizeContext });
+    if (msgId) store.updatePosition(positionRow.id, { notify_message_id: msgId });
   } catch (error) {
     logger.error(`[TRADE OPENED] Помилка відкриття ${mexcSymbol}: ${error.message}`);
     store.updatePosition(positionRow.id, { status: 'error' });
@@ -228,7 +233,7 @@ async function closePosition(positionRow, reason, exitPriceHint = null) {
       `${logTag} Symbol: ${positionRow.mexc_symbol} | TwapId: ${twapEvent.twap_id || '—'} | Entry: ${positionRow.entry_price} | ` +
       `Exit: ${exitPrice ?? '—'} | PnL: ${pnl != null ? pnl.toFixed(2) : '—'}`
     );
-    await notifier.notifyClosed({ symbol: positionRow.mexc_symbol, direction: positionRow.direction, reason, entryPrice: positionRow.entry_price, exitPrice, pnl });
+    await notifier.notifyClosed({ symbol: positionRow.mexc_symbol, direction: positionRow.direction, reason, entryPrice: positionRow.entry_price, exitPrice, pnl, replyToMessageId: positionRow.notify_message_id });
   } catch (error) {
     logger.error(`[CLOSE] Помилка закриття ${positionRow.mexc_symbol} (${reason}): ${error.message}`);
     store.updatePosition(positionRow.id, { status: 'error' });
@@ -289,16 +294,24 @@ function wireExchangePushMonitor() {
       const twapEvent = store.getTwapEvent(row.twap_event_id);
       if (twapEvent) store.claimTwapStatus(twapEvent.id, ['position_open'], 'closed_tp');
       logger.info(`[TP] Symbol: ${row.mexc_symbol} | TwapId: ${twapEvent?.twap_id || '—'} | Entry: ${row.entry_price} | Exit: ${exitPrice} | PnL: ${pnlShare.toFixed(2)}`);
-      notifier.notifyClosed({ symbol: row.mexc_symbol, direction: row.direction, reason: 'tp', entryPrice: row.entry_price, exitPrice, pnl: pnlShare }).catch(() => {});
+      notifier.notifyClosed({ symbol: row.mexc_symbol, direction: row.direction, reason: 'tp', entryPrice: row.entry_price, exitPrice, pnl: pnlShare, replyToMessageId: row.notify_message_id }).catch(() => {});
     }
   });
 }
 
 // ---------------------------------------------------------------------
 // Рідкісна звірка: сума локальних "open" qty по symbol+side vs holdVol на
-// біржі. Розбіжність — це попередження для ручної перевірки, а не
-// автоматичний ремонт: без додаткових даних неможливо надійно вгадати, ЯКИЙ
-// саме TWAP-рядок відповідає за розбіжність, якщо їх декілька на symbol+side.
+// біржі.
+//
+// Якщо на біржі по symbol+side обсяг ЗНИК ПОВНІСТЮ (0) — це однозначний
+// сигнал незалежно від того, скільки локальних TWAP-записів на нього
+// посилалось: там точно нічого не лишилось, тож усі такі рядки фіналізуємо
+// як закриті вручну/зовні і більше НЕ стежимо за цим символом. Це покриває
+// саме кейс "я сам закрив позицію на біржі".
+//
+// А ось якщо обсяг ЗМЕНШИВСЯ, але не до нуля, і локальних рядків на цей
+// symbol+side кілька — це справді неоднозначно (який саме TWAP-шматок
+// закрився?), тут і далі лише попереджаємо в лог, не гадаючи.
 // ---------------------------------------------------------------------
 async function reconcileTick() {
   if (config.trading.dryRun) return;
@@ -321,12 +334,27 @@ async function reconcileTick() {
       const actualVol = existing ? parseFloat(existing.holdVol) : 0;
       const expectedVol = rows.reduce((s, r) => s + r.qty, 0);
 
-      if (Math.abs(actualVol - expectedVol) > 1e-9) {
-        logger.warn(
-          `[RECONCILE] Розбіжність ${symbol} ${direction}: очікували ${expectedVol}, на біржі ${actualVol} ` +
-          `(${rows.length} локальних відкритих записів: ${rows.map(r => r.id).join(', ')}) — потребує ручної перевірки`
-        );
+      if (Math.abs(actualVol - expectedVol) < 1e-9) continue; // збігається, все ок
+
+      if (actualVol === 0) {
+        logger.info(`[POSITION] ${symbol} ${direction}: на біржі позиції більше нема (закрито вручну/зовні) — фіналізую ${rows.length} запис(ів), припиняю стежити`);
+        for (const row of rows) {
+          if (!store.claimPositionClosing(row.id)) continue;
+          store.updatePosition(row.id, {
+            status: 'closed', close_reason: 'manual_external', exit_price: null, pnl: null, closed_at: Date.now()
+          });
+          const twapEvent = store.getTwapEvent(row.twap_event_id);
+          if (twapEvent) store.claimTwapStatus(twapEvent.id, ['position_open'], 'closed_finished');
+          logger.info(`[POSITION] ${symbol}: запис ${row.id} закрито вручну/зовні. Точна ціна виходу і PnL невідомі — перевір на біржі.`);
+          notifier.notifyClosed({ symbol, direction, reason: 'manual_external', entryPrice: row.entry_price, exitPrice: null, pnl: null, replyToMessageId: row.notify_message_id }).catch(() => {});
+        }
+        continue;
       }
+
+      logger.warn(
+        `[RECONCILE] Розбіжність ${symbol} ${direction}: очікували ${expectedVol}, на біржі ${actualVol} ` +
+        `(${rows.length} локальних відкритих записів: ${rows.map(r => r.id).join(', ')}) — часткова, неоднозначна, потребує ручної перевірки`
+      );
     } catch (error) {
       logger.error(`[RECONCILE] ${symbol}: ${error.message}`);
     }

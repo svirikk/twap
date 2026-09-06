@@ -57,11 +57,21 @@ CREATE TABLE IF NOT EXISTS positions (
   exit_price REAL,
   pnl REAL,
   opened_at INTEGER,
-  closed_at INTEGER
+  closed_at INTEGER,
+  notify_message_id INTEGER         -- message_id нашого "ПОЗИЦІЮ ВІДКРИТО" сповіщення,
+                                     -- щоб закриваюче сповіщення прикріпити як reply
 );
 CREATE INDEX IF NOT EXISTS idx_positions_status ON positions(status);
 CREATE INDEX IF NOT EXISTS idx_positions_twap ON positions(twap_event_id);
 `);
+
+// Легка міграція для БД, які вже існували ДО додавання цієї колонки (Railway
+// volume зберігає стан між деплоями) — CREATE TABLE IF NOT EXISTS її не додасть.
+const positionColumns = db.prepare(`PRAGMA table_info(positions)`).all().map(c => c.name);
+if (!positionColumns.includes('notify_message_id')) {
+  db.exec(`ALTER TABLE positions ADD COLUMN notify_message_id INTEGER`);
+  logger.info('[DB] Міграція: додано колонку positions.notify_message_id');
+}
 
 function uuid() {
   return crypto.randomUUID();
@@ -138,6 +148,19 @@ function getOpenTwapCandidates(wallet, symbol) {
   `).all(wallet, symbol);
 }
 
+// Історія розмірів TWAP цього wallet+symbol — для інформаційного "наскільки
+// великий цей вхід відносно звички гаманця" контексту (core/score.js).
+// ПРИМІТКА: рахує тільки в межах retention-вікна очищення БД (див.
+// cleanupOld) — це ковзна історія за останні DB_CLEANUP_AFTER_HOURS, не вся
+// історія гаманця за весь час.
+function getWalletSymbolHistory(wallet, symbol, excludeTwapId) {
+  return db.prepare(`
+    SELECT AVG(notional_usd) as avgNotional, COUNT(*) as cnt
+    FROM twap_events
+    WHERE wallet = ? AND symbol = ? AND id != ?
+  `).get(wallet, symbol, excludeTwapId);
+}
+
 function getAllOpenTwapEvents() {
   return db.prepare(`SELECT * FROM twap_events WHERE status IN ('created', 'position_open')`).all();
 }
@@ -151,10 +174,10 @@ function createPosition(p) {
     INSERT INTO positions
       (id, twap_event_id, symbol, mexc_symbol, direction, margin_usd, leverage,
        notional_usd, qty, entry_order_id, entry_price, mexc_position_id, tp_price,
-       status, close_reason, exit_price, pnl, opened_at, closed_at)
+       status, close_reason, exit_price, pnl, opened_at, closed_at, notify_message_id)
     VALUES (@id, @twap_event_id, @symbol, @mexc_symbol, @direction, @margin_usd, @leverage,
             @notional_usd, @qty, @entry_order_id, @entry_price, @mexc_position_id, @tp_price,
-            @status, NULL, NULL, NULL, @opened_at, NULL)
+            @status, NULL, NULL, NULL, @opened_at, NULL, NULL)
   `).run({
     id,
     twap_event_id: p.twapEventId,
@@ -238,6 +261,7 @@ module.exports = {
   db,
   isMessageProcessed, markMessageProcessed,
   createTwapEvent, getTwapEvent, updateTwapEvent, getOpenTwapCandidates, getAllOpenTwapEvents,
+  getWalletSymbolHistory,
   createPosition, getPosition, updatePosition, getOpenPositionsForTwap, getAllOpenPositions,
   claimPositionClosing, claimTwapStatus,
   cleanupOld

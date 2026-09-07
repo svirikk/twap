@@ -83,6 +83,16 @@ async function notifyClosed(p) {
   return send(lines.join('\n'), { replyToMessageId: p.replyToMessageId });
 }
 
+async function notifyWalletDiscovered(wallet, pattern) {
+  await send(
+    `🔍 <b>Знайдено гаманець за частковим збігом</b>\n\n` +
+    `Шаблон: <code>${pattern.prefix}.../${pattern.suffix}</code>\n` +
+    `Повна адреса: <code>${wallet}</code>\n\n` +
+    `Додай її в <code>config/wallets.js</code> і приберіть відповідний рядок з ` +
+    `<code>config/partial-wallets.js</code>, коли зручно — з цього моменту бот вже стежить за нею.`
+  );
+}
+
 async function notifyError(context, error) {
   logger.error(`[NOTIFY] ${context}: ${error.message}`);
   await send(`❌ <b>ПОМИЛКА</b>\n\n<b>Де:</b> ${context}\n<b>Деталі:</b> ${error.message}`);
@@ -92,4 +102,4 @@ async function notifyStartup(text) {
   await send(text);
 }
 
-module.exports = { send, notifyOpened, notifyClosed, notifyError, notifyStartup };
+module.exports = { send, notifyOpened, notifyClosed, notifyWalletDiscovered, notifyError, notifyStartup };

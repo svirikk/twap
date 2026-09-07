@@ -63,6 +63,15 @@ CREATE TABLE IF NOT EXISTS positions (
 );
 CREATE INDEX IF NOT EXISTS idx_positions_status ON positions(status);
 CREATE INDEX IF NOT EXISTS idx_positions_twap ON positions(twap_event_id);
+
+-- ТИМЧАСОВЕ: гаманці, знайдені через частковий збіг (config/partial-wallets.js).
+-- Прибрати разом з тим файлом, коли рішення більше не потрібне.
+CREATE TABLE IF NOT EXISTS discovered_wallets (
+  wallet TEXT PRIMARY KEY,
+  matched_prefix TEXT,
+  matched_suffix TEXT,
+  discovered_at INTEGER NOT NULL
+);
 `);
 
 // Легка міграція для БД, які вже існували ДО додавання цієї колонки (Railway
@@ -257,11 +266,34 @@ function cleanupOld() {
   }
 }
 
+// ---------------------------------------------------------------------
+// ТИМЧАСОВЕ: гаманці, знайдені через частковий збіг (config/partial-wallets.js)
+// ---------------------------------------------------------------------
+function isDiscoveredWallet(wallet) {
+  return !!db.prepare('SELECT 1 FROM discovered_wallets WHERE wallet = ?').get(wallet);
+}
+
+function addDiscoveredWallet(wallet, prefix, suffix) {
+  try {
+    db.prepare(`
+      INSERT INTO discovered_wallets (wallet, matched_prefix, matched_suffix, discovered_at)
+      VALUES (?, ?, ?, ?)
+    `).run(wallet, prefix, suffix, Date.now());
+  } catch (e) {
+    // вже записано раніше — ігноруємо
+  }
+}
+
+function getAllDiscoveredWallets() {
+  return db.prepare('SELECT * FROM discovered_wallets').all();
+}
+
 module.exports = {
   db,
   isMessageProcessed, markMessageProcessed,
   createTwapEvent, getTwapEvent, updateTwapEvent, getOpenTwapCandidates, getAllOpenTwapEvents,
   getWalletSymbolHistory,
+  isDiscoveredWallet, addDiscoveredWallet, getAllDiscoveredWallets,
   createPosition, getPosition, updatePosition, getOpenPositionsForTwap, getAllOpenPositions,
   claimPositionClosing, claimTwapStatus,
   cleanupOld

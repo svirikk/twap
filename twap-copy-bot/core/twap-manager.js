@@ -10,7 +10,7 @@ function handleCreate(parsed, tgMessageId) {
   if (store.isMessageProcessed(tgMessageId)) return null;
   store.markMessageProcessed(tgMessageId);
 
-  if (!walletFilter.isWhitelisted(parsed.wallet)) return null;
+  if (!walletFilter.resolveAndTrack(parsed.wallet)) return null;
 
   const mexcSymbol = config.toMexcSymbol(parsed.symbol);
   const event = store.createTwapEvent({
@@ -51,7 +51,7 @@ function handleFinish(parsed, tgMessageId) {
   if (store.isMessageProcessed(tgMessageId)) return null;
   store.markMessageProcessed(tgMessageId);
 
-  if (!walletFilter.isWhitelisted(parsed.wallet)) return null;
+  if (!walletFilter.resolveAndTrack(parsed.wallet)) return null;
 
   const candidates = store.getOpenTwapCandidates(parsed.wallet, parsed.symbol);
   if (candidates.length === 0) {

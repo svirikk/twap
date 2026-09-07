@@ -8,5 +8,7 @@
 module.exports = [
   '0xeadc152ac1014ace57c6b353f89adf5faffe9d55',
   '0x77375a8c9d13bf79afb2a87f1b0ac1dfd5f5bf66',
-  '0x469e9a7f624b04c24f0e64edf8d8a277e6bf58a5'
+  '0x469e9a7f624b04c24f0e64edf8d8a277e6bf58a5',
+  '0x7e4e766d0ae5ea9cded0c694669194db92800107',
+  '0x3bcae23e8c380dab4732e9a159c0456f12d866f3'
 ];
